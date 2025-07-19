@@ -1,4 +1,3 @@
-# Copyright (c) 2019 Adi Roiban.
 # See LICENSE for details.
 """
 Tests for ZIP archive handling.
