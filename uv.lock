@@ -173,17 +173,16 @@ dependencies = [
     { name = "cryptography" },
 ]
 
-[package.dev-dependencies]
+[package.optional-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "cryptography", specifier = ">=45.0.5" }]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.4.1" },
-    { name = "ruff", specifier = ">=0.12.3" },
+requires-dist = [
+    { name = "cryptography", specifier = ">=45.0.5" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12.3" },
 ]
+provides-extras = ["dev"]

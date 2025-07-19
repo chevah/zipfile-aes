@@ -40,13 +40,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install uv
-          python patch_zipfile.py
+          uv run patch_zipfile.py
 
       - name: Install project and dev dependencies
         run: |
-          pip install .[dev]
+          uv pip install .[dev]
 
       - name: Run all tests for ${{ matrix.python-version }}
         run: |
-          pytest
-          ruff check
+          uv run pytest
+          uv run ruff check

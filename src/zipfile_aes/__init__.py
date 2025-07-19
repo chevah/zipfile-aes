@@ -10,7 +10,14 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import hmac, hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-# Public constants exposed via ZipInfo
+# Compression type.
+AES_COMPRESSION_TYPE = 99
+
+# The id for the extra data.
+EXTRA_AES_HEADER_ID = 0x9901
+
+AES_VENDOR_ID = b"AE"
+
 AES_V1 = b"\x01\x00"
 AES_V2 = b"\x02\x00"
 
@@ -18,23 +25,14 @@ AES_128 = b"\x01"
 AES_192 = b"\x02"
 AES_256 = b"\x03"
 
-# Compression type.
-AES_COMPRESSION_TYPE = 99
+AES_HMAC_SIZE = 10
 
-# The id for the extra data.
-_EXTRA_AES_HEADER_ID = 0x9901
-
-_AES_VENDOR_ID = b"AE"
-
-_AES_HMAC_SIZE = 10
-
-_AES_SALT_LENGTHS = {
+AES_SALT_LENGTHS = {
     AES_128: 8,
     AES_192: 12,
     AES_256: 16,
 }
-
-_AES_KEY_LENGTHS = {
+AES_KEY_LENGTHS = {
     AES_128: 16,
     AES_192: 24,
     AES_256: 32,
@@ -77,7 +75,7 @@ class ZipInfoWithAES(zipfile.ZipInfo):
         extra = self.extra
         while len(extra) >= 4:
             tp, ln = struct.unpack("<HH", extra[:4])
-            if tp != _EXTRA_AES_HEADER_ID:
+            if tp != EXTRA_AES_HEADER_ID:
                 # Not AES.
                 extra = extra[ln + 4 :]
                 continue
@@ -88,7 +86,7 @@ class ZipInfoWithAES(zipfile.ZipInfo):
                 raise zipfile.BadZipFile("Short AES extra data.")
 
             vendor = extra[6:8]
-            if vendor != _AES_VENDOR_ID:
+            if vendor != AES_VENDOR_ID:
                 raise zipfile.BadZipFile("Unknown AES vendor.")
 
             vendor_version = extra[4:6]
@@ -131,7 +129,7 @@ class ZipExtFileWithAES(zipfile.ZipExtFile):
 
         super().__init__(fileobj, mode, zipinfo, pwd, close_fileobj)
 
-        if zipinfo.aes_version == AES_V2:
+        if zipinfo.aes_version == AES_V2 and self._expected_crc == 0:
             # CRC is not used for v2.
             # Only the HMAC is used.
             self._expected_crc = None
@@ -157,42 +155,56 @@ class ZipExtFileWithAES(zipfile.ZipExtFile):
         """
         if self._zipinfo.aes_version is not None and self._eof:
             # We are at the end of the file for an AES encrypted file.
-            hmac_check = self._fileobj.read(_AES_HMAC_SIZE)
+            hmac_check = self._fileobj.read(AES_HMAC_SIZE)
             self._decrypter.check_hmac(hmac_check)
 
         super()._update_crc(newdata)
 
     def _init_aes_decrypter(self):
+        """
+        Setup decryption for an AES file.
+        """
         if not self._pwd:
             raise zipfile.BadZipFile("File is AES encrypted and requires a password.")
 
         # salt_length + pwd_verify_length
-        header_length = _AES_SALT_LENGTHS[self._zipinfo.aes_strength] + 2
+        header_length = AES_SALT_LENGTHS[self._zipinfo.aes_strength] + 2
         header = self._fileobj.read(header_length)
+
         # Adjust read size for encrypted files since the start of the file
         # may be used for the encryption/password information.
         self._compress_left -= header_length
         # Also remove the hmac length from the end of the file.
-        self._compress_left -= _AES_HMAC_SIZE
+        self._compress_left -= AES_HMAC_SIZE
 
-        self._decrypter = AESZipDecrypter(self._zipinfo, self._pwd, header)
+        self._decrypter = AESZipDecipher(self._zipinfo, self._pwd, header)
 
-        if self._zipinfo.aes_version == AES_V2:
-            # The CRC check is not used for v2.
-            # This is done to prevent disclosure of data for very small files.
-            return 0
+        # FIXME:
+        # This should be removed once the upstream zipfile
+        # does the password checking as part of decryptor initialization.
+        # For AES the password is validate in AESZipDecipher.
+        # This is here to reduce the patch for stdlib.
+        if self._zipinfo.flag_bits & zipfile._MASK_USE_DATA_DESCRIPTOR:
+            # compare against the file type from extended local headers
+            check_byte = (self._zipinfo._raw_time >> 8) & 0xFF
+        else:
+            # compare against the CRC otherwise
+            check_byte = (self._zipinfo.CRC >> 24) & 0xFF
+        return check_byte
 
-        return self._decrypter(header)[11]
 
+class AESZipDecipher:
+    """
+    Decrypt using WinZip AES.
+    """
 
-class AESZipDecrypter:
     hmac_size = 10
 
     def __init__(self, zinfo, pwd, encryption_header):
         self.filename = zinfo.filename
 
-        key_length = _AES_KEY_LENGTHS[zinfo.aes_strength]
-        salt_length = _AES_SALT_LENGTHS[zinfo.aes_strength]
+        key_length = AES_KEY_LENGTHS[zinfo.aes_strength]
+        salt_length = AES_SALT_LENGTHS[zinfo.aes_strength]
 
         salt = struct.unpack(
             "<{}s".format(salt_length), encryption_header[:salt_length]
@@ -208,6 +220,7 @@ class AESZipDecrypter:
         )
         keymaterial = kdf.derive(pwd)
 
+        # Check p
         encpwdverify = keymaterial[2 * key_length :]
         if encpwdverify != pwd_verify:
             raise RuntimeError("Bad password for file %r" % zinfo.filename)
@@ -228,8 +241,8 @@ class AESZipDecrypter:
         """
         This is the public API called at the end of the file.
         """
-        if self._hmac.finalize()[:_AES_HMAC_SIZE] != hmac_check:
-            raise zipfile.BadZipFile(f"Bad HMAC check for file {self.filename}")
+        if self._hmac.finalize()[:AES_HMAC_SIZE] != hmac_check:
+            raise zipfile.BadZipFile(f"Bad HMAC check for file '{self.filename}'")
 
     def _decrypt(self, blocks):
         for block in blocks:
@@ -251,7 +264,7 @@ class AESZipDecrypter:
             yield original[i : i + 16]
 
 
-class ZipWithAES(zipfile.ZipFile):
+class ZipFileWithAES(zipfile.ZipFile):
     """
     ZipFile which handles AES encrypted files.
     """
