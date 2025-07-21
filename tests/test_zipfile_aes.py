@@ -308,3 +308,34 @@ def test_decrypt_bad_crc_ae2():
         with pytest.raises(zipfile.BadZipFile) as context:
             sut.read("test.txt", pwd=b"test")
         assert "Bad CRC-32 for file 'test.txt'" == context.value.args[0]
+
+
+def test_encrypt():
+    """
+    By default it will encrypt small files with AES v2 and compress
+    using the stored method.
+    """
+    password = b"test"
+    destination = BytesIO()
+    with ZipFileWithAES(destination, "w") as sut:
+        sut.setAESEncryption(password=password)
+
+        with sut.open("test.txt", mode="w") as stream:
+            stream.write(b"content")
+
+    # stdlib context manager will not close the file when we pass
+    # a file object.
+    source = BytesIO(destination.getvalue())
+
+    with ZipFileWithAES(source, "r") as sut:
+        result = sut.infolist()
+        assert 1 == len(result)
+        assert "test.txt" == result[0].filename
+        assert 7 == result[0].file_size
+
+        assert AES_256 == result[0].aes_strength
+        assert AES_V2 == result[0].aes_version
+        assert zipfile.ZIP_STORED == result[0].aes_compression
+
+        content = sut.read("test.txt", pwd=password)
+        assert b"content" == content
